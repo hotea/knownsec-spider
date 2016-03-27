@@ -8,14 +8,18 @@ import re
 import sqlite3
 import optparse
 import logging
+import logging.handlers
+import threading
+
 
 class Crawler():
-    def __init__(self, url, depth, db, key):
+    def __init__(self, url, depth, db, key, logger):
         self.url = url
         self.depth = depth
         self.db = db
+        self.logger = logger
         self.pages = set()
-        self.table_name = re.search(r'^((https?://)?(www.)?)(.*)$', url).groups()[-1].replace('.', '_')
+        self.table_name = '_' + re.search(r'^((https?://)?(www.)?)(.*)$', url).groups()[-1].replace('.', '_')
         self.db.create_table(self.table_name)
         self.key = key
 
@@ -34,15 +38,15 @@ class Crawler():
                 self.pages.add(url)
                 response = requests.get(url, headers=headers,timeout=2) 
             except requests.Timeout as e:
-                print('Timeout Error: ', e)
+                self.logger.error(e)
                 return
             except requests.ConnectionError as e:
-                print('ConnectionError Error: ', e)
+                self.logger.error(e)
                 return
             except requests.HTTPError as e:
-                print('HTTPError Error: ', e)
+                self.logger.error(e)
             except requests.RequestException  as e:
-                print('Requestexception Error happend:', e)
+                self.logger.error(e)
 
             html = response.content 
             soup = self.parse_html(html)
@@ -55,22 +59,24 @@ class Crawler():
 
             for new_url in self.parse_new_url(soup):
                 print(new_url)
+                self.logger.debug(new_url)
                 # 深度优先爬取
                 self.get_html(new_url, depth-1, key)
 
 
     def parse_html(self, html):
         #html = html.decode()
-        soup = bs4.BeautifulSoup(html, 'lxml')
+        try:
+            soup = bs4.BeautifulSoup(html, 'lxml')
+        except:
+            raise
         return soup
 
     def parse_new_url(self, soup): 
-        #links = []
         links = set() 
         for link in soup.find_all('a', href=re.compile(r'^(https?|www).*$')):
             new_url = link.attrs['href']
             if new_url  and not self.is_crawled(new_url):
-                #self.pages.add(new_url)
                 links.add(new_url)
         return links
     
@@ -79,23 +85,20 @@ class Crawler():
                 {"url": url, "key": self.key, "content": content})
         self.db.conn.commit()
 
-
-class Log():
-    def __init__(self):
-        pass
-
 class Database():
-    def __init__(self, dbfile):
-        self.conn = sqlite3.connect(dbfile)
+    def __init__(self, dbfile, logger):
+        self.dbfile = dbfile
+        self.logger = logger
+        self.conn = sqlite3.connect(self.dbfile)
         self.curs = self.conn.cursor()
         
 
     def create_table(self, table):
         #self.curs.execute("DROP TABLE IF EXISTS {}".format(table))
-        self.curs.execute('CREATE TABLE IF NOT EXISTS {} ( id INTEGER  PRIMARY KEY, key TEXT, url TEXT, content TEXT)'.format(table))
-
-
-
+        try:
+            self.curs.execute('CREATE TABLE IF NOT EXISTS {} ( id INTEGER  PRIMARY KEY, key TEXT, url TEXT, content TEXT)'.format(table))
+        except sqlite3.OperationalError as e:
+            self.logger.error(e)
 
 
 def get_options():
@@ -108,14 +111,31 @@ def get_options():
     parser.add_option('--dbfile', dest='dbfile', action='store', default='spider.db', help='database file')
     parser.add_option('--test', '--testself', dest='testself', action='store_true', default=False, help='program test self')
     parser.add_option('-t', '--thread', dest='thread', action='store', type='int', default=2, help='multi threading')
-
     return parser.parse_args()[0]
+
+def get_a_logger(logfile, loglevel):
+    LEVELS = {
+            1: logging.CRITICAL,
+            2: logging.ERROR,
+            3: logging.WARNING,
+            4: logging.INFO,
+            5: logging.DEBUG,
+            }
+    logger = logging.getLogger(__name__)
+    logger.setLevel(LEVELS.get(loglevel))
+    #logger.addHandler(logging.NullHandler())
+    form = logging.Formatter("%(levelname)-10s %(asctime)s %(message)s")
+    handler = logging.handlers.RotatingFileHandler(logfile, maxBytes=20480000, backupCount=3)
+    handler.setFormatter(form)
+    logger.addHandler(handler)
+    return logger
 
 if __name__ == '__main__':
 
     opt = get_options()
-    db = Database(opt.dbfile)
-    c = Crawler(opt.url, opt.depth, db, opt.key)
+    logger = get_a_logger(opt.logfile, opt.loglevel)
+    db = Database(opt.dbfile, logger)
+    c = Crawler(opt.url, opt.depth, db, opt.key, logger)
     c.get_html(c.url, c.depth, c.key)
         
 

@@ -10,6 +10,7 @@ import optparse
 import logging
 import logging.handlers
 import threading
+import queue
 
 
 class Crawler():
@@ -89,7 +90,7 @@ class Database():
     def __init__(self, dbfile, logger):
         self.dbfile = dbfile
         self.logger = logger
-        self.conn = sqlite3.connect(self.dbfile)
+        self.conn = sqlite3.connect(self.dbfile, check_same_thread=False)
         self.curs = self.conn.cursor()
         
 
@@ -100,17 +101,50 @@ class Database():
         except sqlite3.OperationalError as e:
             self.logger.error(e)
 
+class Worker(threading.Thread):
+    def __init__(self, jobs):
+        super().__init__()
+        self.jobs = jobs
+        self.daemon = True
+        self.start()
+    def run(self):
+        while True:
+            func, args, kargs = self.jobs.get()
+            try:
+                func(*args, **kargs)
+            except Exception as e:
+                raise e
+            self.tasks.task_done()
+
+class Threadpool():
+    def __init__(self, jobs_num):
+        self.jobs_num = jobs_num
+        #self.threads_num = threads_num
+        self.jobs = queue.Queue()
+        for i in range(self.jobs_num):
+            Worker(self.jobs)
+        #self.threads = []
+        #self._init_pool(self.threads_num)
+
+
+    def init_job_queue(self, func, *args, **kargs):
+        for i in range(self.jobs_num):
+            self.jobs.put((func, args, kargs))
+    def wait_completion(self):
+        self.jobs.join()
+
+
 
 def get_options():
     parser = optparse.OptionParser()
     parser.add_option('-u', '--url', dest='url', action='store', default='http://www.sina.com.cn', help='specify the url')
-    parser.add_option('-d', '--depth', dest='depth', action='store', type='int', default=1, help='specify the crawl depth')
+    parser.add_option('-d', '--depth', dest='depth', action='store', type='int', default=5, help='specify the crawl depth')
     parser.add_option('-f', '--logfile', dest='logfile', action='store', default='spider.log', help='specify log file ')
-    parser.add_option('-l', '--loglevel', dest='loglevel', action='store', type='int', default=1, help='specify log level, default 1')
+    parser.add_option('-l', '--loglevel', dest='loglevel', action='store', type='int', default=5, help='specify log level, default 1')
     parser.add_option('-k', '--key', dest='key', action='store', help='specify the keyword')
     parser.add_option('--dbfile', dest='dbfile', action='store', default='spider.db', help='database file')
     parser.add_option('--test', '--testself', dest='testself', action='store_true', default=False, help='program test self')
-    parser.add_option('-t', '--thread', dest='thread', action='store', type='int', default=2, help='multi threading')
+    parser.add_option('-t', '--thread', dest='thread', action='store', type='int', default=5, help='multi threading')
     return parser.parse_args()[0]
 
 def get_a_logger(logfile, loglevel):
@@ -136,7 +170,10 @@ if __name__ == '__main__':
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)
     c = Crawler(opt.url, opt.depth, db, opt.key, logger)
-    c.get_html(c.url, c.depth, c.key)
+    #c.get_html(c.url, c.depth, c.key)
+    tp = Threadpool(opt.thread)
+    tp.init_job_queue(c.get_html, c.url, c.depth, c.key)
+    tp.wait_completion()
         
 
 

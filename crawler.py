@@ -13,14 +13,17 @@ import threading
 import queue
 from collections import deque
 
+pages = set()
 
 class Crawler():
-    def __init__(self, url, depth, db, key, logger):
+    def __init__(self, url, depth, db, key, logger, tp):
+        self.tp = tp
         self.url = url
         self.depth = depth
         self.db = db
         self.logger = logger
-        self.pages = set()  #集合用于网址去重
+        global pages
+        self.pages = pages  #集合用于网址去重
         self.table_name = '_' + re.search(r'^(?:https?://)(?:www.)?([^/]*)', url).groups()[-1].replace('.', '_')  #以起始网址命名数据表, 如"_sina_com_cn"
         self.db.create_table(self.table_name)
         self.key = key  # 抓取指定的关键字
@@ -29,18 +32,14 @@ class Crawler():
     def dfs_crawl(self, url, depth, key=None):
         if depth > 0:
             if not url: return
-            lock.acquire()
             self.pages.add(url)
-            lock.release()
             try:
                 for new_url in self.get_urls_from_url(url, key):
                     # 深度优先爬取
                     if new_url not in self.pages:
                         print(new_url)
                         self.logger.debug('found url:' + new_url)
-                        lock.acquire()
-                        self.dfs_crawl(new_url, depth-1, key)
-                        lock.release()
+                        self.tp.add_job(self.dfs_crawl, new_url, depth-1, key)
             except TypeError as e:
                 self.logger.info(e)
                 pass
@@ -80,10 +79,8 @@ class Crawler():
         links = [] 
         for link in soup.find_all('a', href=re.compile(r'^(https?|www).*$')):
             new_url = link.attrs['href']
-            lock.acquire()
             if new_url  and new_url not in self.pages:
                 links.append(new_url)
-            lock.release()
         return links
 
 
@@ -139,13 +136,9 @@ class Worker(threading.Thread):
         self.start()
     def run(self):
         while True:
-            #try:
-                #lock.acquire()
             func, args, kargs = self.jobs.get()
             func(*args, **kargs)
             self.jobs.task_done()
-            #finally:
-            #    lock.release()
 
 class Threadpool():
     def __init__(self, jobs_num):
@@ -156,11 +149,14 @@ class Threadpool():
             Worker(self.jobs)
         #self.threads = []
         #self._init_pool(self.threads_num)
+    def add_job(self, func, *args, **kargs):
+        self.jobs.put((func, args, kargs))
 
-
+    '''
     def init_job_queue(self, func, *args, **kargs):
         for i in range(self.jobs_num):
-            self.jobs.put((func, args, kargs))
+            self.add_job((func, args, kargs))
+    '''
     def wait_completion(self):
         self.jobs.join()
 
@@ -201,10 +197,11 @@ if __name__ == '__main__':
     opt = get_options()
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)
-    c = Crawler(opt.url, opt.depth, db, opt.key, logger)
+    tp = Threadpool(opt.thread )
+    c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp)
 #    c.dfs_crawl(c.url, c.depth, c.key)
-    tp = Threadpool(opt.thread)
-    tp.init_job_queue(c.dfs_crawl, c.url, c.depth, c.key)
+#    tp.init_job_queue(c.dfs_crawl, c.url, c.depth, c.key)
+    tp.add_job(c.dfs_crawl, c.url, c.depth, c.key)
     tp.wait_completion()
         
 

@@ -21,24 +21,28 @@ class Crawler():
         self.db = db
         self.logger = logger
         self.pages = set()  #集合用于网址去重
-        self.table_name = '_' + re.search(r'^((https?://)?(www.)?)(.*)/', url).groups()[-1].replace('.', '_')  #以起始网址命名数据表, 如"_sina_com_cn"
+        self.table_name = '_' + re.search(r'^(?:https?://)(?:www.)?([^/]*)', url).groups()[-1].replace('.', '_')  #以起始网址命名数据表, 如"_sina_com_cn"
         self.db.create_table(self.table_name)
         self.key = key  # 抓取指定的关键字
 
-    def is_crawled(self, url):
-        return True if url in self.pages else False
 
     def dfs_crawl(self, url, depth, key=None):
         if depth > 0:
             if not url: return
+            lock.acquire()
             self.pages.add(url)
+            lock.release()
             try:
                 for new_url in self.get_urls_from_url(url, key):
                     # 深度优先爬取
-                    print(new_url)
-                    self.logger.debug('found url:' + new_url)
-                    self.dfs_crawl(new_url, depth-1, key)
+                    if new_url not in self.pages:
+                        print(new_url)
+                        self.logger.debug('found url:' + new_url)
+                        lock.acquire()
+                        self.dfs_crawl(new_url, depth-1, key)
+                        lock.release()
             except TypeError as e:
+                self.logger.info(e)
                 pass
         
 
@@ -76,8 +80,10 @@ class Crawler():
         links = [] 
         for link in soup.find_all('a', href=re.compile(r'^(https?|www).*$')):
             new_url = link.attrs['href']
-            if new_url  and not self.is_crawled(new_url):
+            lock.acquire()
+            if new_url  and new_url not in self.pages:
                 links.append(new_url)
+            lock.release()
         return links
 
 
@@ -92,13 +98,16 @@ class Crawler():
     
     def save_content(self, url, key=None, content=None):
         try:
+            lock.acquire()
             self.db.curs.execute("INSERT INTO {} (url, key, content) VALUES (:url, :key, :content)".format( self.table_name),
                     {"url": url, "key": self.key, "content": content})
             self.db.conn.commit()
-            self.logger.debug('save content to database, with table neme {}'.format(self.table_name))
+            self.logger.debug('save content to database table: {}'.format(self.table_name))
         except sqlite3.Error as e:
-            self.logger.error(e)
+            self.logger.critical(e)
             raise e
+        finally:
+            lock.release()
 
 
 class Database():
@@ -108,9 +117,9 @@ class Database():
         try:
             self.conn = sqlite3.connect(self.dbfile, check_same_thread=False)
             self.logger.debug('connecting to sqlite3 database with db name {}'.format(self.dbfile))
+            self.curs = self.conn.cursor()
         except sqlite3.Connection.Error as e:
-            self.logger.error(e)
-        self.curs = self.conn.cursor()
+            self.logger.critical(e)
         
 
     def create_table(self, table):
@@ -119,10 +128,8 @@ class Database():
             self.curs.execute('CREATE TABLE IF NOT EXISTS {} ( id INTEGER  PRIMARY KEY, key TEXT, url TEXT, content TEXT)'.format(table))
         except sqlite3.OperationalError as e:
             self.logger.error(e)
-            raise e
         except sqlite3.Error as e:
             self.logger.error(e)
-            raise e
 
 class Worker(threading.Thread):
     def __init__(self, jobs):
@@ -132,9 +139,13 @@ class Worker(threading.Thread):
         self.start()
     def run(self):
         while True:
+            #try:
+                #lock.acquire()
             func, args, kargs = self.jobs.get()
             func(*args, **kargs)
-            self.tasks.task_done()
+            self.jobs.task_done()
+            #finally:
+            #    lock.release()
 
 class Threadpool():
     def __init__(self, jobs_num):
@@ -179,20 +190,21 @@ def get_a_logger(logfile, loglevel):
     logger.setLevel(LEVELS.get(loglevel))
     #logger.addHandler(logging.NullHandler())
     form = logging.Formatter("%(levelname)-10s %(asctime)s %(message)s")
-    handler = logging.handlers.RotatingFileHandler(logfile, maxBytes=20480000, backupCount=3)
+    handler = logging.handlers.RotatingFileHandler(logfile, maxBytes=2048000, backupCount=3)
     handler.setFormatter(form)
     logger.addHandler(handler)
     return logger
 
 if __name__ == '__main__':
 
+    lock = threading.RLock()
     opt = get_options()
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)
     c = Crawler(opt.url, opt.depth, db, opt.key, logger)
 #    c.dfs_crawl(c.url, c.depth, c.key)
     tp = Threadpool(opt.thread)
-    tp.init_job_queue(c.get_urls_from_url, c.url, c.depth, c.key)
+    tp.init_job_queue(c.dfs_crawl, c.url, c.depth, c.key)
     tp.wait_completion()
         
 

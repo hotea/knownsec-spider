@@ -36,7 +36,7 @@ class Crawler():
     def crawl(self, url, depth):
         '''实现爬取功能的主要函数'''
 
-        self.finished += 1 # 更新已完成任务数
+        #self.finished += 1 # 更新已完成任务数
         if depth > self.depth_limit: # 当前深度超过指定深度, 停止抓取, 将工作队列标记为任务完成
             self.db.conn.commit()
             self.logger.info(
@@ -52,27 +52,28 @@ class Crawler():
                     self.next_total = 0
                     self.logger.info('enter the {} level'.format(self.cur_level))
                     self.logger.info('the URL numbers of current level is {}'.format(self.cur_total))
+            return
         try:
-            if url and url not in self.pages:
+            if  url not in self.pages:
                 self.pages.add(url) # 将新抓取的URL放入重复检测集合
                 self.logger.debug('fetch url: {}'.format(url))
                 with lock:
-                    #self.show_progress() # 显示进度
                     new_urls = self.get_urls_from_url(url) # 获取此页面链出的URL
                     if not new_urls:
                         self.failed_total += 1
                         return
+                    self.finished += 1 # 更新已完成任务数
                     if depth == self.depth_limit: # 如果该层是最后一层则不需要添加新任务, 直接返回
                         return
                     for new_url in new_urls: # 将每一个新解析出的URL加入任务, 并更新下层任务总数
-                        if new_url not in self.pages:
-                            self.next_total += 1
-                            self.tp.add_job(self.crawl, new_url, depth+1)
+                        self.next_total += 1
+                        self.tp.add_job(self.crawl, new_url, depth+1)
         except Exception as e:
             self.logger.critical(e)
             print('fuck the error', e)
             raise e
 
+    """
     def show_progress(self):
         '''显示进度的函数'''
         sys.stdout.write(' ' * 60 + '\r')
@@ -80,7 +81,7 @@ class Crawler():
         sys.stdout.write('level {}, finished {}, total {}, failed {}\r'.format(
             self.cur_level, self.finished,  self.cur_total, self.failed_total))
         sys.stdout.flush()
-#        sys.stdout.write(str(self.tp.jobs.unfinished_tasks))
+        """
 
     def get_urls_from_url(self, url):
         '''获取某页面的所有url '''
@@ -92,7 +93,7 @@ class Crawler():
             'Accept-Language': 'zh-CN,zh;q=0.8,en;q=0.6',
         }
         try:
-            response = requests.get(url, headers=headers, timeout=2)
+            response = requests.get(url, headers=headers, timeout=1)
         except requests.Timeout as e:
             self.logger.error(e)
             return
@@ -116,6 +117,7 @@ class Crawler():
         else:
             self.save_content(url, content=html)
 
+        #  查找所有新的URL并保存在列表返回
         links = []
         for link in soup.find_all('a', href=re.compile(r'^(https?|www).*$')):
             new_url = link.attrs['href']
@@ -171,29 +173,29 @@ class Database():
             self.logger.error(e)
 
 class Progress(threading.Thread):
+    '''进度类'''
     def __init__(self,crawler):
         super().__init__()
         self.c = crawler
         self.daemon = True
-    #    self.start()
+        self.start()
 
     def run(self):
         while True:
             self.show_progress()
-            time.sleep(1)
+            time.sleep(10)
 
     def show_progress(self):
         '''显示进度的函数'''
         sys.stdout.write(' ' * 60 + '\r')
         sys.stdout.flush()
-        sys.stdout.write('level {}, finished {}, total {}, failed {}\r'.format(
-            self.c.cur_level, self.c.finished,  self.c.cur_total, self.c.failed_total))
+        sys.stdout.write('当前是第 {} 层, 该层URL总数: {}, 已抓取数量: {}, 失败数量: {}\r'.format(
+            self.c.cur_level, self.c.cur_total, self.c.finished, self.c.failed_total))
         sys.stdout.flush()
-        print('\n')
 #        sys.stdout.write(str(self.tp.jobs.unfinished_tasks))
 
 class Worker(threading.Thread):
-    '''将被放入线程池中的工作线程'''
+    '''被放入线程池中的工作线程'''
 
     def __init__(self, threadpool):
         super().__init__()
@@ -216,12 +218,14 @@ class Threadpool():
         self.jobs_num = jobs_num
         #self.threads_num = threads_num
         #self.threads = []
-        self.jobs = queue.Queue()
+        self.jobs = queue.Queue() # 工作队列
 
+        # 实例化每个工作线程, 线程数由程序参数指定'''
         for i in range(self.jobs_num):
             Worker(self)
 
     def add_job(self, func, *args, **kargs):
+        '''将任务放入队列'''
         self.jobs.put((func, args, kargs))
 
     def wait_completion(self):
@@ -231,27 +235,29 @@ class SelfTest():
     pass
 
 def get_options():
+    '''解析命令行选项'''
     parser = optparse.OptionParser()
     parser.add_option('-u', '--url', dest='url', action='store',
-                      default='http://www.sina.com.cn', help='specify the url')
+                      default='http://www.sina.com.cn', help='指定起始URL')
     parser.add_option('-d', '--depth', dest='depth', action='store',
-                      type='int', default=5, help='specify the crawl depth')
+                      type='int', default=3, help='指定爬取深度, 默认3层')
     parser.add_option('-f', '--logfile', dest='logfile', action='store',
-                      default='spider.log', help='specify log file ')
+                      default='spider.log', help='指定日志文件, 默认spider.log ')
     parser.add_option('-l', '--loglevel', dest='loglevel', action='store',
-                      type='int', default=5, help='specify log level, default 1')
+                      type='int', default=3, help='指定日志级别, 默认ERROR级')
     parser.add_option('-k', '--key', dest='key',
-                      action='store', help='specify the keyword')
+                      action='store', help='指定关键词, 如未指定则保存所有网页')
     parser.add_option('-t', '--thread', dest='thread', action='store',
-                      type='int', default=5, help='multi threading')
+                      type='int', default=5, help='指定线程池大小, 默认5个线程')
     parser.add_option('--dbfile', dest='dbfile', action='store',
-                      default='spider.db', help='database file')
+                      default='spider.db', help='指定数据库文件, 默认 spider.db')
     parser.add_option('--test', '--testself', dest='testself',
-                      action='store_true', default=False, help='program test self')
+                      action='store_true', default=False, help='程序是否自测, 默认否')
     return parser.parse_args()[0]
 
 
 def get_a_logger(logfile, loglevel):
+    '''返回一个日志记录器实例'''
     LEVELS = {
         1: logging.CRITICAL,
         2: logging.ERROR,
@@ -262,9 +268,9 @@ def get_a_logger(logfile, loglevel):
     logger = logging.getLogger(__name__)
     logger.setLevel(LEVELS.get(loglevel))
     # logger.addHandler(logging.NullHandler())
-    form = logging.Formatter("%(levelname)-10s %(asctime)s %(message)s")
+    form = logging.Formatter("%(levelname)-10s %(asctime)s %(message)s") # 日志显示格式
     handler = logging.handlers.RotatingFileHandler(
-        logfile, maxBytes=2048000, backupCount=3)
+        logfile, maxBytes=2048000, backupCount=3) # 设置为旋转日志
     handler.setFormatter(form)
     logger.addHandler(handler)
     return logger
@@ -274,23 +280,21 @@ if __name__ == '__main__':
 
     '''
 
-    lock = threading.RLock()
+    lock = threading.RLock() # 线程锁
     opt = get_options()
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)
     tp = Threadpool(opt.thread)
     c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp)
     progress = Progress(c)
-    progress.start()
-    tp.add_job(c.crawl, opt.url, 1)
+    tp.add_job(c.crawl, opt.url, 1) # 将起始URL加入任务队列, 设置当前深度为1
     try:
-        tp.wait_completion()
+        tp.wait_completion() # 等待所有任务完成
         logger.info('all tasks done')
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # 按 Ctrl+C 退出
         db.conn.commit()
-        logger.info(
-                'save content to database table: {}'.format(c.table_name))
-        logger.info('cancel by user')
+        logger.info('save content to database table: {}'.format(c.table_name))
+        logger.info('exit, tasks cancel by user')
         sys.exit('\ntask canceled\n')
-    logger.info('EXIT!')
-    print('\nwell  done')
+    logger.info('exit normally')
+    sys.exit('\n抓取完成')

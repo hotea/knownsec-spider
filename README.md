@@ -21,4 +21,7 @@ spider.py -u url -d deep -f logfile -l loglevel(1-5)  --testself --thread number
 
  --testself 程序自测，可选参数
 
-
+### 程序依赖库
+python3-lxml
+python3-requests
+python3-bs4

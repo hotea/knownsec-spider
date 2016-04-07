@@ -75,7 +75,6 @@ class Crawler():
         except Exception as e:
             self.logger.critical(e)
             self.logger.critical(traceback.format_exc())
-            raise e
 
     def change_level(self, depth):
         '''进入下一层'''

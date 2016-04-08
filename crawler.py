@@ -10,7 +10,9 @@ import doctest
 import logging
 import logging.handlers
 import optparse
+import pickle
 import queue
+import queuelib
 import re
 import requests
 import sqlite3
@@ -50,7 +52,7 @@ class Crawler():
             self.db.conn.commit()
             self.logger.debug(
                 'save content to database table: {}'.format(self.table_name))
-            self.tp.jobs.task_done()  # 通知队列任务完成
+            self.tp.job.task_done()  # 通知队列任务完成
         if depth > self.current_level:  # 进入下一层
             # 当切换层数时, 用sleep来简化同步, 较早到达下层的线程等待一段时间,
             # 使所有线程都抵达下一层, 然后再更新下层任务数, 保证数目正确
@@ -161,7 +163,6 @@ class Crawler():
 
     def report(self):
         '''最后的统计报告'''
-        time.sleep(5)
         print('\n', '-' * 30, ' 结果统计 ', '-' * 30)
         print('总URL数: {}, 共抓取: {}, 其中失败: {}'.format(
             self.total, self.total_finished, self.total_failed))
@@ -237,6 +238,7 @@ class Progress(threading.Thread):
 class Worker(threading.Thread):
     '''被放入线程池中的工作线程'''
 
+    #global lock
     def __init__(self, threadpool):
         super().__init__()
         self.tp = threadpool
@@ -245,32 +247,55 @@ class Worker(threading.Thread):
 
     def run(self):
         while True:
-            func, args, kargs = self.tp.jobs.get()  # 获取一个任务
-            func(*args, **kargs)  # 执行该任务
+            func, args = self.tp.job.get()  # 获取一个任务
+            logger.debug('get a task from job queue, job size: {}'.format(self.tp.job.qsize()))
+            func(*args)  # 执行该任务
             self.tp.current_finished += 1  # 更新完成任务数
-            self.tp.jobs.task_done()  # 通知任务队列该任务完成
+            self.tp.job.task_done()  # 通知任务队列该任务完成
 
+            if self.tp.event.is_set() and self.tp.job.qsize() <= self.tp.q_lower_limit:
+                try:
+                    self.tp.job.put((func, pickle.loads(self.tp.job2.pop())))
+                    logger.debug('move a task from job2 to job, then job size is {}, job2 size is{}'.format(self.tp.job.qsize(), self.tp.job2.info['size']))
+                    if self.tp.job2.info['size'] == 0:
+                        logger.info('!!! job2 empty, looks good !!!')
+                        self.tp.event.clear()
+                except TypeError:
+                    logger.error(traceback.format_exc())
 
 class Threadpool():
     '''线程池'''
 
+    q_upper_limit = 100
+    q_lower_limit = 10
     def __init__(self, thread_num):
         self.thread_num = thread_num  # 线程池大小
-        self.jobs = queue.Queue()  # 工作队列
+        self.job = queue.Queue(self.q_upper_limit + 10)  # 工作队列
+        self.job2 = queuelib.FifoDiskQueue('job2')  # 磁盘工作队列
         self.threads = []  # 线程池
         self.current_finished = 0  # 当前层完成任务数初始化为0
         self.__init_threadpool(thread_num)  # 初始化线程池
+        self.event = threading.Event()
 
     def __init_threadpool(self, thread_num):
         for i in range(thread_num):
             self.threads.append(Worker(self))
 
-    def add_job(self, func, *args, **kargs):
+    def add_job(self, func, *args):
         '''将任务放入队列'''
-        self.jobs.put((func, args, kargs))
+
+        if self.event.is_set():
+            self.job2.push(pickle.dumps(args))
+            logger.debug('push task into job2, job2 size: {}'.format(self.job2.info['size']))
+        else:
+            self.job.put((func, args))
+            logger.debug('put task into job, job size: {}'.format(self.job.qsize()))
+        if self.job.qsize() >= self.q_upper_limit:
+            logger.debug('!!!!! job full, tasks will be put into jobs2 !!!!!')
+            self.event.set()
 
     def wait_completion(self):
-        self.jobs.join()
+        self.job.join()
 
 
 def get_options():
@@ -279,7 +304,7 @@ def get_options():
     parser.add_option('-u', '--url', dest='url', action='store',
                       help='指定起始URL')
     parser.add_option('-d', '--depth', dest='depth', action='store',
-                      type='int', default=3, help='指定爬取深度, 默认3层')
+                      type='int', default=2, help='指定爬取深度, 默认2层')
     parser.add_option('-f', '--logfile', dest='logfile', action='store',
                       default='spider.log', help='指定日志文件, 默认spider.log ')
     parser.add_option('-l', '--loglevel', dest='loglevel', action='store',
@@ -340,17 +365,6 @@ def main():
     >>> c.db.curs.execute('select id, key, url from _sina_com_cn').fetchone()
     (1, '互联网', 'http://www.sina.com.cn')
     '''
-    lock = threading.RLock()  # 线程锁
-    opt = get_options()  # 获取命令行选项及参数
-    if opt.testself:
-        import doctest
-        print(doctest.testmod())
-        sys.exit('Selftest finished\n')
-    if not opt.url:
-        sys.exit('Need to specify the URL, use "-h" see help\n')
-    if not opt.url.startswith('http://'):
-        opt.url = 'http://' + opt.url
-    logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)  # 数据库实例
     tp = Threadpool(opt.thread)  # 线程池实例
     c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp, lock)  # 爬虫实例
@@ -365,6 +379,7 @@ def main():
         c.total_finished += tp.current_finished
         logger.info('all tasks done')
     except KeyboardInterrupt:  # 按 Ctrl+C 退出
+        print('please wait few seconds...')
         logger.info('task canceled by user')
         c.total += c.current_total
         c.total_failed += c.current_failed
@@ -376,4 +391,15 @@ def main():
     sys.exit('\n抓取完成')
 
 if __name__ == '__main__':
+    lock = threading.RLock()  # 线程锁
+    opt = get_options()  # 获取命令行选项及参数
+    if opt.testself:
+        import doctest
+        print(doctest.testmod())
+        sys.exit('Selftest finished\n')
+    if not opt.url:
+        sys.exit('Need to specify the URL, use "-h" see help\n')
+    if not opt.url.startswith('http://'):
+        opt.url = 'http://' + opt.url
+    logger = get_a_logger(opt.logfile, opt.loglevel)
     main()

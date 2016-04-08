@@ -25,13 +25,11 @@ import time
 class Crawler():
     '''爬虫类'''
 
-    def __init__(self, url, depth_limit, db, key, logger, tp, lock):
+    def __init__(self, url, depth_limit, db, key, tp):
         self.url = url  # 入口URL
         self.depth_limit = depth_limit  # 深度限制
         self.key = key  # 抓取指定的关键字
-        self.logger = logger    # 日志实例
         self.tp = tp    # 线程池实例
-        self.lock = lock  # 一把坚硬的锁
         self.pages = set()  # 集合用于网址去重
         self.db = db  # 数据库实例
         self.table_name = '_' + re.search(r'^(?:https?://)(?:www.)?([^/]*)', url).groups(
@@ -50,21 +48,21 @@ class Crawler():
 
         if depth > self.depth_limit:  # 当前深度超过指定深度, 停止抓取, 将工作队列标记为任务完成
             self.db.conn.commit()
-            self.logger.debug(
+            logger.debug(
                 'save content to database table: {}'.format(self.table_name))
             self.tp.job.task_done()  # 通知队列任务完成
         if depth > self.current_level:  # 进入下一层
             # 当切换层数时, 用sleep来简化同步, 较早到达下层的线程等待一段时间,
             # 使所有线程都抵达下一层, 然后再更新下层任务数, 保证数目正确
             time.sleep(1 * self.current_level * self.tp.thread_num)
-            with self.lock:
+            with lock:
                 if depth > self.current_level:  # 双重检查锁, 保证该语句块只被多个线程中的一个执行一次
                     self.change_level(depth)  # 切换层数
             return
         try:
             if url not in self.pages:
                 self.pages.add(url)  # 将新抓取的URL放入重复检测集合
-                self.logger.debug('fetch url: {}'.format(url))
+                logger.debug('fetch url: {}'.format(url))
                 new_urls = self.get_urls_from_url(url)  # 获取此页面链出的URL
                 if not new_urls:
                     self.current_failed += 1
@@ -75,12 +73,12 @@ class Crawler():
                 for new_url in new_urls:  # 将每一个新解析出的URL加入任务
                     self.tp.add_job(self.crawl, new_url, depth + 1)
         except Exception as e:
-            self.logger.critical(e)
-            self.logger.critical(traceback.format_exc())
+            logger.critical(e)
+            logger.critical(traceback.format_exc())
 
     def change_level(self, depth):
         '''进入下一层'''
-        self.logger.info('level {} finished, total URL number: {}, failed {}'.format(
+        logger.info('level {} finished, total URL number: {}, failed {}'.format(
             self.current_level, self.current_total, self.current_failed))
         print('\n' + '=' * 60)
         self.total_finished += self.tp.current_finished  # 更新完成总数
@@ -91,8 +89,8 @@ class Crawler():
         self.current_total = self.next_total  # 设置新一层的任务总数, 此数目由爬取完上层URL之后得来
         self.next_total = 0  # 下层总数置0
         self.current_level = depth  # 当前层编号设置为下层编号
-        self.logger.info('enter the {} level'.format(self.current_level))
-        self.logger.info('the URL numbers of the {} level is {}'.format(
+        logger.info('enter the {} level'.format(self.current_level))
+        logger.info('the URL numbers of the {} level is {}'.format(
             self.current_level, self.current_total))
 
     def get_urls_from_url(self, url):
@@ -107,16 +105,16 @@ class Crawler():
             # 可视网络情况调整 timeout 时长
             response = requests.get(url, headers=headers, timeout=2)
         except requests.Timeout as e:
-            self.logger.error(e)
+            logger.error(e)
             return
         except requests.ConnectionError as e:
-            self.logger.error(e)
+            logger.error(e)
             return
         except requests.HTTPError as e:
-            self.logger.error(e)
+            logger.error(e)
             return
         except requests.RequestException as e:
-            self.logger.error(e)
+            logger.error(e)
             return
 
         html = response.content
@@ -143,23 +141,23 @@ class Crawler():
         try:
             soup = bs4.BeautifulSoup(html, 'lxml')
         except Exception as e:
-            self.logger.error('parse error: {}'.format(e))
+            logger.error('parse error: {}'.format(e))
         return soup
 
     def save_content(self, url, content=None):
         '''保存信息到数据库 '''
         try:
-            self.lock.acquire()
+            lock.acquire()
             self.db.curs.execute("INSERT INTO {} (url, key, content) VALUES (:url, :key, :content)".format(self.table_name),
                                  {"url": url, "key": self.key, "content": content})
             self.db.conn.commit()
-            self.logger.debug(
+            logger.debug(
                 'save content to database table: {}'.format(self.table_name))
         except sqlite3.Error as e:
-            self.logger.critical('sqlite3 error: {}'.format(e))
-            self.logger.critical(traceback.format_exc())
+            logger.critical('sqlite3 error: {}'.format(e))
+            logger.critical(traceback.format_exc())
         finally:
-            self.lock.release()
+            lock.release()
 
     def report(self):
         '''最后的统计报告'''
@@ -172,7 +170,7 @@ class Crawler():
             print('共保存了 {} 个页面'.format(num.fetchone()[0]))
             self.db.conn.close()
         except sqlite3.Error as e:
-            self.logger.error(e)
+            logger.error(e)
             return
 
 
@@ -181,22 +179,22 @@ class Database():
 
     def __init__(self, dbfile, logger):
         self.dbfile = dbfile  # 指定数据库文件
-        self.logger = logger
+        logger = logger
         self._init_database()
 
     def _init_database(self):
         try:
             self.conn = sqlite3.connect(self.dbfile, check_same_thread=False)
-            self.logger.info(
+            logger.info(
                 'connecting to sqlite3 database with db name {}'.format(self.dbfile))
             self.curs = self.conn.cursor()
         except sqlite3.Connection.Error as e:
-            self.logger.critical('sqlite3 error: {}'.format(e))
-            self.logger.critical(traceback.format_exc())
+            logger.critical('sqlite3 error: {}'.format(e))
+            logger.critical(traceback.format_exc())
             return
         except sqlite3.Error as e:
-            self.logger.critical('sqlite3 error: {}'.format(e))
-            self.logger.critical(traceback.format_exc())
+            logger.critical('sqlite3 error: {}'.format(e))
+            logger.critical(traceback.format_exc())
             return
 
     def create_table(self, table):
@@ -205,9 +203,9 @@ class Database():
             self.curs.execute(
                 'CREATE TABLE IF NOT EXISTS {} ( id INTEGER  PRIMARY KEY, key TEXT, url TEXT, content TEXT)'.format(table))
         except sqlite3.OperationalError as e:
-            self.logger.error(e)
+            logger.error(e)
         except sqlite3.Error as e:
-            self.logger.error(e)
+            logger.error(e)
 
 
 class Progress(threading.Thread):
@@ -238,7 +236,6 @@ class Progress(threading.Thread):
 class Worker(threading.Thread):
     '''被放入线程池中的工作线程'''
 
-    #global lock
     def __init__(self, threadpool):
         super().__init__()
         self.tp = threadpool
@@ -251,23 +248,28 @@ class Worker(threading.Thread):
             logger.debug('get a task from job queue, job size: {}'.format(self.tp.job.qsize()))
             func(*args)  # 执行该任务
             self.tp.current_finished += 1  # 更新完成任务数
+            logger.debug('current level finished tasks: {}'.format(self.tp.current_finished))
             self.tp.job.task_done()  # 通知任务队列该任务完成
 
-            if self.tp.event.is_set() and self.tp.job.qsize() <= self.tp.q_lower_limit:
+            if self.tp.job_full_event.is_set() and self.tp.job.qsize() == 0: #<= self.tp.q_lower_limit:
                 try:
-                    self.tp.job.put((func, pickle.loads(self.tp.job2.pop())))
-                    logger.debug('move a task from job2 to job, then job size is {}, job2 size is{}'.format(self.tp.job.qsize(), self.tp.job2.info['size']))
+                    lock.acquire()
+                    r = min(self.tp.q_upper_limit, self.tp.job2.info['size'])
+                    for _ in range(r):
+                        self.tp.job.put((func, pickle.loads(self.tp.job2.pop())))
+                    logger.debug('move tasks from job2 to job, then job size is {}, job2 size is{}'.format(self.tp.job.qsize(), self.tp.job2.info['size']))
                     if self.tp.job2.info['size'] == 0:
                         logger.info('!!! job2 empty, looks good !!!')
-                        self.tp.event.clear()
+                        self.tp.job_full_event.clear()
                 except TypeError:
                     logger.error(traceback.format_exc())
+                finally:
+                    lock.release()
 
 class Threadpool():
     '''线程池'''
 
-    q_upper_limit = 100
-    q_lower_limit = 10
+    q_upper_limit = 20000  # 任务队列长度上限
     def __init__(self, thread_num):
         self.thread_num = thread_num  # 线程池大小
         self.job = queue.Queue(self.q_upper_limit + 10)  # 工作队列
@@ -275,7 +277,7 @@ class Threadpool():
         self.threads = []  # 线程池
         self.current_finished = 0  # 当前层完成任务数初始化为0
         self.__init_threadpool(thread_num)  # 初始化线程池
-        self.event = threading.Event()
+        self.job_full_event = threading.Event()
 
     def __init_threadpool(self, thread_num):
         for i in range(thread_num):
@@ -284,15 +286,15 @@ class Threadpool():
     def add_job(self, func, *args):
         '''将任务放入队列'''
 
-        if self.event.is_set():
+        if self.job_full_event.is_set():
             self.job2.push(pickle.dumps(args))
             logger.debug('push task into job2, job2 size: {}'.format(self.job2.info['size']))
         else:
             self.job.put((func, args))
             logger.debug('put task into job, job size: {}'.format(self.job.qsize()))
-        if self.job.qsize() >= self.q_upper_limit:
-            logger.debug('!!!!! job full, tasks will be put into jobs2 !!!!!')
-            self.event.set()
+            if self.job.qsize() >= self.q_upper_limit:
+                logger.debug('!!!!! job full, tasks will be put into jobs2 !!!!!')
+                self.job_full_event.set()
 
     def wait_completion(self):
         self.job.join()
@@ -356,7 +358,7 @@ def main():
     >>> logger = get_a_logger(opt.logfile, opt.loglevel)
     >>> db = Database(opt.dbfile, logger)
     >>> tp = Threadpool(opt.thread)
-    >>> c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp, lock)
+    >>> c = Crawler(opt.url, opt.depth, db, opt.key,tp)
     >>> c.table_name
     '_sina_com_cn'
     >>> c.total
@@ -367,7 +369,7 @@ def main():
     '''
     db = Database(opt.dbfile, logger)  # 数据库实例
     tp = Threadpool(opt.thread)  # 线程池实例
-    c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp, lock)  # 爬虫实例
+    c = Crawler(opt.url, opt.depth, db, opt.key, tp)  # 爬虫实例
     progress = Progress(c, tp)  # 进度实例
     tp.add_job(c.crawl, opt.url, 1)  # 将起始URL加入任务队列, 设置当前深度为1
     logger.info('tasks start!, destination url: {}, depth limitation: {}'.format(

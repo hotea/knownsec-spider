@@ -18,6 +18,7 @@ import sys
 import threading
 import traceback
 import time
+import urllib.parse as parse
 
 
 class Crawler():
@@ -161,7 +162,6 @@ class Crawler():
 
     def report(self):
         '''最后的统计报告'''
-        time.sleep(5)
         print('\n', '-' * 30, ' 结果统计 ', '-' * 30)
         print('总URL数: {}, 共抓取: {}, 其中失败: {}'.format(
             self.total, self.total_finished, self.total_failed))
@@ -173,6 +173,49 @@ class Crawler():
         except sqlite3.Error as e:
             self.logger.error(e)
             return
+
+class CrawlerSameSite(Crawler):
+    '''子爬虫类, 只抓取同一域名下的页面, 重载crawl方法'''
+
+    def __init__(self, url, depth_limit, db, key, logger, tp, lock):
+        super().__init__(url, depth_limit, db, key, logger, tp, lock)
+        self.dom = parse.urlparse(url)[1]
+
+    def crawl(self, url, depth):
+
+        if depth > self.depth_limit:  # 当前深度超过指定深度, 停止抓取, 将工作队列标记为任务完成
+            self.db.conn.commit()
+            self.logger.debug(
+                'save content to database table: {}'.format(self.table_name))
+            self.tp.jobs.task_done()  # 通知队列任务完成
+        if depth > self.current_level:  # 进入下一层
+            # 当切换层数时, 用sleep来简化同步, 较早到达下层的线程等待一段时间,
+            # 使所有线程都抵达下一层, 然后再更新下层任务数, 保证数目正确
+            time.sleep(1 * self.current_level * self.tp.thread_num)
+            with self.lock:
+                if depth > self.current_level:  # 双重检查锁, 保证该语句块只被多个线程中的一个执行一次
+                    self.change_level(depth)  # 切换层数
+            return
+        try:
+            if url not in self.pages and parse.urlparse(url)[1].endswith(self.dom):
+                self.pages.add(url)  # 将新抓取的URL放入重复检测集合
+                self.logger.debug('fetch url: {}'.format(url))
+                new_urls = self.get_urls_from_url(url)  # 获取此页面链出的URL
+                if not new_urls:
+                    self.current_failed += 1
+                    return
+                if depth == self.depth_limit:  # 如果该层是最后一层则不需要添加新任务, 直接返回
+                    return
+                #self.next_total += len(new_urls)  # 更新下层任务总数
+                for new_url in new_urls:  # 将每一个新解析出的URL加入任务
+                    if parse.urlparse(new_url)[1].endswith(self.dom):
+                        self.next_total += 1
+                        self.tp.add_job(self.crawl, new_url, depth + 1)
+        except Exception as e:
+            self.logger.critical(e)
+            self.logger.critical(traceback.format_exc())
+
+
 
 
 class Database():
@@ -353,18 +396,21 @@ def main():
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)  # 数据库实例
     tp = Threadpool(opt.thread)  # 线程池实例
-    c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp, lock)  # 爬虫实例
+    #c = Crawler(opt.url, opt.depth, db, opt.key, logger, tp, lock)  # 爬虫实例
+    c = CrawlerSameSite(opt.url, opt.depth, db, opt.key, logger, tp, lock)  # 爬虫实例
     progress = Progress(c, tp)  # 进度实例
     tp.add_job(c.crawl, opt.url, 1)  # 将起始URL加入任务队列, 设置当前深度为1
     logger.info('tasks start!, destination url: {}, depth limitation: {}'.format(
         opt.url, opt.depth))
     try:
         tp.wait_completion()  # 等待所有任务完成
+        progress.show_progress()
         c.total += c.current_total  # 任务完成后更新完成总数, 用于报告
         c.total_failed += c.current_failed
         c.total_finished += tp.current_finished
         logger.info('all tasks done')
     except KeyboardInterrupt:  # 按 Ctrl+C 退出
+        print('\n\nplease wait a few seconds...')
         logger.info('task canceled by user')
         c.total += c.current_total
         c.total_failed += c.current_failed

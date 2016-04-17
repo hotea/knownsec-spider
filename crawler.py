@@ -391,7 +391,7 @@ def main():
         sys.exit('Selftest finished\n')
     if not opt.url:
         sys.exit('Need to specify the URL, use "-h" see help\n')
-    if not opt.url.startswith('http://'):
+    if not opt.url.startswith('http'):
         opt.url = 'http://' + opt.url
     logger = get_a_logger(opt.logfile, opt.loglevel)
     db = Database(opt.dbfile, logger)  # 数据库实例

@@ -2,7 +2,8 @@
 # _*_ encoding: utf-8 _*_
 
 # __author__ = 'sukai@outlook.com'
-# __version__ = '0.99'
+# __version__ = '0.99a'
+# with disk queue
 
 
 import bs4
@@ -381,7 +382,7 @@ if __name__ == '__main__':
         sys.exit('not implement\n')
     if not opt.url:
         sys.exit('Need to specify the URL, use "-h" see help\n')
-    if not opt.url.startswith('http://'):
+    if not opt.url.startswith('http'):
         opt.url = 'http://' + opt.url
     logger = get_a_logger(opt.logfile, opt.loglevel)
     main()
